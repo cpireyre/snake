@@ -1,8 +1,22 @@
 import curses
 from collections import namedtuple
-from itertools import repeat, product
+from itertools import count, product
 from more_itertools import side_effect, consume, random_product
 from collections import deque
+
+
+def transduce(xf, consumer, signal):
+    """Sort of like iterate but with a stream of secondary inputs..."""
+    while signal:
+        consumer = xf(consumer, next(signal))
+        yield consumer
+
+
+# TODO: move these
+def repeatedly(f):
+    while True:
+        yield f()
+
 
 UP, DOWN, LEFT, RIGHT = (
     curses.KEY_UP,
@@ -29,7 +43,7 @@ Game = namedtuple(
 
 def initgame(W, H):
     snakeXY = W // 2, H // 2
-    apples = (random_product(range(W), range(H)) for _ in repeat(None))
+    apples = repeatedly(lambda: random_product(range(W), range(H)))
     appleXY = next(apples)
     snakeSize = 1
     snakeTail = deque()
@@ -63,11 +77,12 @@ def play(G, INPUT):  # could dispatch with a dict?
 
 
 def show(G):  # do I pass curses-specific attributes here?
+    # thinking of punting and just adding a "META" field
     """Takes a game state and returns a ready-to-render list of tuples (x, y, symbol)"""
     return (
         (*G.snakeXY, "&"),
         (*G.appleXY, "@"),
-        (0, 0, ascii(G)),
+        # (0, 0, ascii(G)),
     ) + tuple((*_, "&") for _ in G.snakeTail)
 
 
@@ -94,16 +109,9 @@ def draw(scr):
     return handler
 
 
-def transduce(xf, consumer, signal):
-    """Sort of like iterate but with a stream of secondary inputs..."""
-    while signal:
-        consumer = xf(consumer, next(signal))
-        yield consumer
-
-
 def main(scr):
     H, W = scr.getmaxyx()
-    inputs = (scr.getch() for _ in repeat(None))
+    inputs = repeatedly(lambda: scr.getch())
     states = transduce(play, initgame(W - 1, H - 1), inputs)
     frames = map(show, states)
     consume(side_effect(draw(scr), frames, before=initscr(scr)))
