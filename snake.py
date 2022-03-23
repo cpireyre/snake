@@ -1,42 +1,98 @@
 import curses
 from collections import namedtuple
-from itertools import count
-from more_itertools import side_effect, consume
+from itertools import repeat, product
+from more_itertools import side_effect, consume, random_product
+from collections import deque
 
-UP, DOWN, LEFT, RIGHT = curses.KEY_UP, curses.KEY_DOWN, curses.KEY_LEFT, curses.KEY_RIGHT
+UP, DOWN, LEFT, RIGHT = (
+    curses.KEY_UP,
+    curses.KEY_DOWN,
+    curses.KEY_LEFT,
+    curses.KEY_RIGHT,
+)
+NO_MOVE = -1  # there is probably a curses.KEY for this?
+# TODO: uh oh I should refactor this to use dataclass apparently
+Game = namedtuple(
+    "Game",
+    [
+        "snakeXY",
+        "snakeSize",
+        "snakeTail",
+        "lastKey",
+        "W",
+        "H",
+        "apples",
+        "appleXY",
+    ],
+)
 
-Game = namedtuple("Game", ["snakex", "snakey"])
 
-def move(G, INPUT): # assumes origin is top left which comes from curses, hmm
-    x = G.snakex + (INPUT == RIGHT) - (INPUT == LEFT)
-    y = G.snakey - (INPUT == UP) + (INPUT == DOWN)
-    return G._replace(snakex=x, snakey=y)
-    
-def play(G, INPUT): # could dispatch with a dict?
+def initgame(W, H):
+    snakeXY = W // 2, H // 2
+    apples = (random_product(range(W), range(H)) for _ in repeat(None))
+    appleXY = next(apples)
+    snakeSize = 1
+    snakeTail = deque()
+    return Game(snakeXY, snakeSize, snakeTail, NO_MOVE, W, H, apples, appleXY)
+
+
+def move(G, INPUT):  # assumes origin is top left which comes from curses, hmm
+    x = (G.snakeXY[0] + (INPUT == RIGHT) - (INPUT == LEFT)) % G.W
+    y = (G.snakeXY[1] - (INPUT == UP) + (INPUT == DOWN)) % G.H
+
+    if (x, y) in G.snakeTail:
+        return G  # TODO: no op if walking backwards, event loss if tripping
+    G.snakeTail.append(G.snakeXY)  # mutable state!!!
+    if len(G.snakeTail) >= G.snakeSize:
+        G.snakeTail.popleft()
+
+    return G._replace(snakeXY=(x, y))
+
+
+def play(G, INPUT):  # could dispatch with a dict?
     """Takes game state and INPUT, returns updated game state"""
+    if INPUT != NO_MOVE:
+        G = G._replace(lastKey=INPUT)
+    else:
+        INPUT = G.lastKey
     if INPUT in {UP, DOWN, LEFT, RIGHT}:
         G = move(G, INPUT)
+        if G.snakeXY == G.appleXY:
+            G = G._replace(appleXY=next(G.apples), snakeSize=G.snakeSize + 1)
     return G
 
-def show(G): # attributes?
-    """Takes a game state and returns a ready-to-render list of tuples (x, y, symbol)"""
-    return [(G.snakex, G.snakey, "&")]
 
-INPUT_TIMEOUT_MS = -1
+def show(G):  # do I pass curses-specific attributes here?
+    """Takes a game state and returns a ready-to-render list of tuples (x, y, symbol)"""
+    return (
+        (*G.snakeXY, "&"),
+        (*G.appleXY, "@"),
+        (0, 0, ascii(G)),
+    ) + tuple((*_, "&") for _ in G.snakeTail)
+
+
+INPUT_TIMEOUT_MS = 70
+
 
 def initscr(scr):
-    curses.curs_set(0)
-    curses.use_default_colors()
-    for i in range(0, curses.COLORS):
-        curses.init_pair(i + 1, i, -1)
-    scr.timeout(INPUT_TIMEOUT_MS)
+    def handler():
+        curses.curs_set(0)
+        curses.use_default_colors()
+        for i in range(0, curses.COLORS):
+            curses.init_pair(i + 1, i, -1)
+        scr.timeout(INPUT_TIMEOUT_MS)
+
+    return handler
+
 
 def draw(scr):
     def handler(serialized):
         scr.clear()
         for x, y, symbol in serialized:
             scr.addstr(y, x, symbol)
+
     return handler
+
 
 def transduce(xf, consumer, signal):
     """Sort of like iterate but with a stream of secondary inputs..."""
@@ -44,12 +100,13 @@ def transduce(xf, consumer, signal):
         consumer = xf(consumer, next(signal))
         yield consumer
 
+
 def main(scr):
-    initscr(scr)
-    G = Game(10, 10)
-    inputs = (scr.getch() for _ in count())
-    states = transduce(play, G, inputs)
+    H, W = scr.getmaxyx()
+    inputs = (scr.getch() for _ in repeat(None))
+    states = transduce(play, initgame(W - 1, H - 1), inputs)
     frames = map(show, states)
-    consume(side_effect(draw(scr), frames))
+    consume(side_effect(draw(scr), frames, before=initscr(scr)))
+
 
 core = curses.wrapper(main)
