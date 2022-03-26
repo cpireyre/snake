@@ -1,10 +1,11 @@
 import curses
 from collections import namedtuple
-from itertools import count, product
-from more_itertools import side_effect, consume, random_product
+from itertools import count, product, dropwhile
+from more_itertools import side_effect, consume, random_product, first_true
 from collections import deque
 
 
+# TODO: move these
 def transduce(xf, consumer, signal):
     """Sort of like iterate but with a stream of secondary inputs..."""
     while signal:
@@ -12,11 +13,9 @@ def transduce(xf, consumer, signal):
         yield consumer
 
 
-# TODO: move these
 def repeatedly(f):
     while True:
         yield f()
-
 
 UP, DOWN, LEFT, RIGHT = (
     curses.KEY_UP,
@@ -24,66 +23,87 @@ UP, DOWN, LEFT, RIGHT = (
     curses.KEY_LEFT,
     curses.KEY_RIGHT,
 )
+ARROWS = {UP, DOWN, LEFT, RIGHT}
+
+directions = {
+        UP: (0, -1),
+        DOWN: (0, 1),
+        LEFT: (-1, 0),
+        RIGHT: (1, 0),
+        }
+
 NO_MOVE = -1  # there is probably a curses.KEY for this?
 # TODO: uh oh I should refactor this to use dataclass apparently
 Game = namedtuple(
     "Game",
     [
-        "snakeXY",
-        "snakeSize",
-        "snakeTail",
-        "lastKey",
+        "snake",
+        "snakeDirection",
         "W",
         "H",
         "apples",
-        "appleXY",
+        "apple",
+        "alive",
     ],
 )
 
 
 def initgame(W, H):
     snakeXY = W // 2, H // 2
+    snake = deque([snakeXY])
+    snakeDirection = (0, 0)
     apples = repeatedly(lambda: random_product(range(W), range(H)))
-    appleXY = next(apples)
-    snakeSize = 1
-    snakeTail = deque()
-    return Game(snakeXY, snakeSize, snakeTail, NO_MOVE, W, H, apples, appleXY)
+    apple = next(apples)
+    alive = True
+    return Game(
+            snake, snakeDirection, W, H, apples, apple,
+            alive,)
 
 
-def move(G, INPUT):  # assumes origin is top left which comes from curses, hmm
-    x = (G.snakeXY[0] + (INPUT == RIGHT) - (INPUT == LEFT)) % G.W
-    y = (G.snakeXY[1] - (INPUT == UP) + (INPUT == DOWN)) % G.H
+def translate(u, v, wall, ceiling): # vector translation on a 2D torus
+    """Returns the vector translation of u by v on a 2D torus of specified dimensions."""
+    return (u[0] + v[0]) % wall, (u[1] + v[1]) % ceiling
 
-    if (x, y) in G.snakeTail:
-        return G  # TODO: no op if walking backwards, event loss if tripping
-    G.snakeTail.append(G.snakeXY)  # mutable state!!!
-    if len(G.snakeTail) >= G.snakeSize:
-        G.snakeTail.popleft()
+def turn(G, INPUT):
+    """Takes game + input, returns a game whose snake may be oriented to match input"""
+    if INPUT not in ARROWS:
+        return G
+    else:
+        vx, vy = directions[INPUT]
+        if (vx and vx == -G.snakeDirection[0]) or (vy and vy == -G.snakeDirection[1]):
+            return G
+        else:
+            return G._replace(snakeDirection=(vx, vy))
 
-    return G._replace(snakeXY=(x, y))
-
+def step(G):
+    move = translate(G.snake[-1], G.snakeDirection, G.W, G.H)
+    if move not in G.snake:
+        G.snake.append(move)
+        return G
+    else:
+        return G._replace(alive=False)
 
 def play(G, INPUT):  # could dispatch with a dict?
     """Takes game state and INPUT, returns updated game state"""
-    if INPUT != NO_MOVE:
-        G = G._replace(lastKey=INPUT)
+    G = turn(G, INPUT)
+    G = step(G)
+    if not G.alive:
+        return None
+    elif G.snake[-1] == G.apple:
+        return G._replace(
+                apple=first_true(G.apples, lambda a: a not in set(G.snake)))
     else:
-        INPUT = G.lastKey
-    if INPUT in {UP, DOWN, LEFT, RIGHT}:
-        G = move(G, INPUT)
-        if G.snakeXY == G.appleXY:
-            G = G._replace(appleXY=next(G.apples), snakeSize=G.snakeSize + 1)
-    return G
+        G.snake.popleft()
+        return G
 
 
 def show(G):  # do I pass curses-specific attributes here?
     # thinking of punting and just adding a "META" field
     """Takes a game state and returns a ready-to-render list of tuples (x, y, symbol)"""
     return (
-        (*G.snakeXY, "&"),
-        (*G.appleXY, "@"),
-        # (0, 0, ascii(G)),
-    ) + tuple((*_, "&") for _ in G.snakeTail)
+        (*G.apple, "@"),
+        (0, 0, ascii(G)),
+    ) + tuple((*_, "&") for _ in G.snake)
 
 
 INPUT_TIMEOUT_MS = 70
@@ -111,10 +131,9 @@ def draw(scr):
 
 def main(scr):
     H, W = scr.getmaxyx()
-    inputs = repeatedly(lambda: scr.getch())
+    inputs = dropwhile(lambda i: i not in ARROWS, repeatedly(lambda: scr.getch()))
     states = transduce(play, initgame(W - 1, H - 1), inputs)
-    frames = map(show, states)
-    consume(side_effect(draw(scr), frames, before=initscr(scr)))
+    consume(side_effect(draw(scr), map(show, states), before=initscr(scr)))
 
 
 core = curses.wrapper(main)
